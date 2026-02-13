@@ -57,11 +57,23 @@ tab-size = 4
 #include "../btop_tools.hpp"
 
 #if defined(GPU_SUPPORT)
+	// Redefining C++ keywords fortunately has a warning in clang, however it's unavoidable here
+	// since the C library uses "class" as a struct member and keywords are not allowed to be used
+	// as identifiers in C++.
+	#if defined(__clang__)
+		#pragma clang diagnostic push
+		#pragma clang diagnostic ignored "-Wkeyword-macro"
+	#endif // __clang__
+
 	#define class class_
 extern "C" {
-	#include "./intel_gpu_top/intel_gpu_top.h"
+	#include "intel_gpu_top/intel_gpu_top.h"
 }
 	#undef class
+
+	#if defined(__clang__)
+		#pragma clang diagnostic pop
+	#endif // __clang__
 #endif
 
 using std::abs;
@@ -132,9 +144,10 @@ namespace Cpu {
 	std::unordered_map<int, int> core_mapping;
 }
 
+#if defined(GPU_SUPPORT)
+
 namespace Gpu {
 	vector<gpu_info> gpus;
-#ifdef GPU_SUPPORT
 	//? NVIDIA data collection
 	namespace Nvml {
 		//? NVML defines, structs & typedefs
@@ -254,8 +267,9 @@ namespace Gpu {
 		template <bool is_init> bool collect(gpu_info* gpus_slice);
 		uint32_t device_count = 0;
 	}
-#endif
 }
+
+#endif // GPU_SUPPORT
 
 namespace Mem {
 	double old_uptime;
@@ -514,11 +528,11 @@ namespace Cpu {
 
 					int64_t high = 0;
 					int64_t crit = 0;
-					for (int ii = 0; fs::exists(basepath / string("trip_point_" + to_string(ii) + "_temp")); ii++) {
-						const string trip_type = readfile(basepath / string("trip_point_" + to_string(ii) + "_type"));
+					for (int ii = 0; fs::exists(basepath / fmt::format("trip_point_{}_temp", ii)); ii++) {
+						const string trip_type = readfile(basepath / fmt::format("trip_point_{}_type", ii));
 						if (not is_in(trip_type, "high", "critical")) continue;
 						auto& val = (trip_type == "high" ? high : crit);
-						val = stol(readfile(basepath / string("trip_point_" + to_string(ii) + "_temp"), "0")) / 1000;
+						val = stol(readfile(basepath / fmt::format("trip_point_{}_temp", ii), "0")) / 1000;
 					}
 					if (high < 1) high = 80;
 					if (crit < 1) crit = 95;
@@ -1339,6 +1353,9 @@ namespace Gpu {
 							Logger::warning("NVML: Failed to get PCIe RX throughput: {}", nvmlErrorString(result));
 						} else gpus_slice[i].pcie_rx = (long long)rx;
 					});
+				} else {
+					gpus_slice[i].pcie_tx = -1;
+					gpus_slice[i].pcie_rx = -1;
 				}
 
 				// DebugTimer nvTimer("Nv utilization");
@@ -1768,7 +1785,7 @@ namespace Gpu {
 				}
 
 				//? PCIe link speeds
-				if (gpus_slice[i].supported_functions.pcie_txrx and Config::getB("rsmi_measure_pcie_speeds")) {
+				if ((gpus_slice[i].supported_functions.pcie_txrx and Config::getB("rsmi_measure_pcie_speeds")) or is_init) {
 					uint64_t tx, rx;
 					result = rsmi_dev_pci_throughput_get(i, &tx, &rx, nullptr);
     				if (result != RSMI_STATUS_SUCCESS) {
@@ -1778,6 +1795,9 @@ namespace Gpu {
 						gpus_slice[i].pcie_tx = (long long)tx;
 						gpus_slice[i].pcie_rx = (long long)rx;
 					}
+				} else {
+					gpus_slice[i].pcie_tx = -1;
+					gpus_slice[i].pcie_rx = -1;
 				}
     		}
 
@@ -2218,11 +2238,13 @@ namespace Mem {
 								string devname = disks.at(mountpoint).dev.filename();
 								int c = 0;
 								while (devname.size() >= 2) {
-									if (fs::exists("/sys/block/" + devname + "/stat", ec) and access(string("/sys/block/" + devname + "/stat").c_str(), R_OK) == 0) {
-										if (c > 0 and fs::exists("/sys/block/" + devname + '/' + disks.at(mountpoint).dev.filename().string() + "/stat", ec))
-											disks.at(mountpoint).stat = "/sys/block/" + devname + '/' + disks.at(mountpoint).dev.filename().string() + "/stat";
+									const auto stat = fmt::format("/sys/block/{}/stat", devname);
+									if (fs::exists(stat, ec) and access(stat.c_str(), R_OK) == 0) {
+										const auto mount_stat = fmt::format("/sys/block/{}/{}/stat", devname, disks.at(mountpoint).dev.filename());
+										if (c > 0 and fs::exists(mount_stat, ec))
+											disks.at(mountpoint).stat = std::move(mount_stat);
 										else
-											disks.at(mountpoint).stat = "/sys/block/" + devname + "/stat";
+											disks.at(mountpoint).stat = std::move(stat);
 										break;
 									//? Set ZFS stat filepath
 									} else if (fstype == "zfs") {
@@ -3168,13 +3190,14 @@ namespace Proc {
 			}
 			//? Set correct state of dead processes if paused
 			else {
+				const bool keep_dead_proc_usage = Config::getB("keep_dead_proc_usage");
 				for (auto& r : current_procs) {
 					if (rng::find(found, r.pid) == found.end()) {
 						if (r.state != 'X') r.death_time = round(uptime) - (r.cpu_s / Shared::clkTck);
 						r.state = 'X';
 						dead_procs.emplace(r.pid);
 						//? Reset cpu usage for dead processes if paused and option is set
-						if (!Config::getB("keep_dead_proc_usage")) {
+						if (!keep_dead_proc_usage) {
 							r.cpu_p = 0.0;
 							r.mem = 0;
 						}

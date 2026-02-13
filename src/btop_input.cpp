@@ -253,26 +253,33 @@ namespace Input {
 						Menu::show(Menu::Menus::SizeError);
 						return;
 					}
-					Config::current_preset = -1;
+					Config::current_preset.reset();
 					Draw::calcSizes();
+					Draw::update_clock(true);
 					Runner::run("all", false, true);
 					return;
 				}
-				else if (is_in(key, "p", "P") and Config::preset_list.size() > 1) {
+				else if (is_in(key, "p", "P") and Config::getS("disable_presets") != "All") {
+					if (Config::getS("disable_presets") == "Default" and Config::preset_list.size() <= 1) return;
 					const auto old_preset = Config::current_preset;
-					if (key == "p") {
-						if (++Config::current_preset >= (int)Config::preset_list.size()) Config::current_preset = 0;
+					const int first_preset = (Config::getS("disable_presets") == "Default") ? 1 : 0;
+					if (Config::getS("disable_presets") == "Custom") Config::current_preset = 0;
+					else if (Config::current_preset.has_value()) {
+						if (key == "p") {
+							if(++(*Config::current_preset) >= static_cast<int>(Config::preset_list.size())) Config::current_preset = first_preset;
+						}
+						else if (--(*Config::current_preset) < first_preset) Config::current_preset = Config::preset_list.size() - 1;
 					}
-					else {
-						if (--Config::current_preset < 0) Config::current_preset = Config::preset_list.size() - 1;
-					}
+					else Config::current_preset = (key == "p") ? first_preset : Config::preset_list.size() - 1;
+					if (Config::current_preset == old_preset) return;
 					atomic_wait(Runner::active);
-					if (not Config::apply_preset(Config::preset_list.at(Config::current_preset))) {
+					if (not Config::apply_preset(Config::preset_list.at(Config::current_preset.value()))) {
 						Menu::show(Menu::Menus::SizeError);
 						Config::current_preset = old_preset;
 						return;
 					}
 					Draw::calcSizes();
+					Draw::update_clock(true);
 					Runner::run("all", false, true);
 					return;
 				} else if (is_in(key, "ctrl_r")) {
@@ -355,6 +362,10 @@ namespace Input {
 					}
 					else if (Config::getB("follow_process")) {
 						Config::flip("follow_process");
+						if (Config::getB("should_selection_return_to_followed"))
+							Config::set("proc_selected", Config::getI("proc_followed"));
+						else if (Config::getB("show_detailed") and Config::getI("followed_pid") == Config::getI("detailed_pid"))
+							Config::set("restore_detailed_pid", Config::getI("detailed_pid"));
 						Config::set("followed_pid", 0);
 						Config::set("proc_followed", 0);
 					}
@@ -395,6 +406,8 @@ namespace Input {
 									process("enter");
 									return;
 								}
+								else if (Config::getB("proc_banner_shown") and line == y + height - 2)
+									return;
 								else if (current_selection == 0 or line - y - 1 == 0)
 									redraw = true;
 
@@ -449,31 +462,35 @@ namespace Input {
 						if (Config::getB("proc_follow_detailed")) {
 							Config::set("follow_process", true);
 							Config::set("followed_pid", Config::getI("selected_pid"));
-							Config::set("update_following", true);
 						}
 						Config::set("show_detailed", true);
 					}
 					else if (Config::getB("show_detailed")) {
-						const int proc_start_offset = Config::getB("proc_follow_detailed") ? Config::getI("proc_followed") - Config::getI("proc_last_selected") : 0;
-						if (Config::getI("proc_last_selected") > 0) Config::set("proc_selected", Config::getI("proc_last_selected"));
-						Config::set("proc_start", std::max(0, Config::getI("proc_start") + proc_start_offset));
+						if (Config::getB("proc_follow_detailed")) {
+							Config::set("restore_detailed_pid", Config::getI("detailed_pid"));
+							if (Config::getB("follow_process") and Config::getI("followed_pid") == Config::getI("detailed_pid")) {
+								Config::flip("follow_process");
+								Config::set("followed_pid", 0);
+								Config::set("proc_followed", 0);
+							}
+						}
+						else if (Config::getI("proc_last_selected") > 0) Config::set("proc_selected", Config::getI("proc_last_selected"));
 						Config::set("proc_last_selected", 0);
 						Config::set("detailed_pid", 0);
 						Config::set("show_detailed", false);
-						if (Config::getB("follow_process") and Config::getB("proc_follow_detailed")) {
-							Config::flip("follow_process");
-							Config::set("followed_pid", 0);
-							Config::set("proc_followed", 0);
-						}
 					}
+					Config::set("update_following", true);
 				}
-				else if (is_in(key, "+", "-", "space", "C") and Config::getB("proc_tree") and Config::getI("proc_selected") > 0) {
-					atomic_wait(Runner::active);
-					auto& pid = Config::getI("selected_pid");
-					if (key == "+" or key == "space") Proc::expand = pid;
-					if (key == "-" or key == "space") Proc::collapse = pid;
-					if (key == "C")	Proc::toggle_children = pid;
-					no_update = false;
+				else if (is_in(key, "+", "-", "space", "C") and Config::getB("proc_tree")) {
+					const bool is_following_detailed = Config::getB("follow_process") and Config::getI("followed_pid") == Config::getI("detailed_pid");
+					if (Config::getI("proc_selected") > 0 or is_following_detailed) {
+						atomic_wait(Runner::active);
+						auto& pid = is_following_detailed and Config::getI("proc_selected") == 0 ? Config::getI("followed_pid") : Config::getI("selected_pid");
+						if (key == "+" or key == "space") Proc::expand = pid;
+						if (key == "-" or key == "space") Proc::collapse = pid;
+						if (key == "C")	Proc::toggle_children = pid;
+						no_update = false;
+					}
 				}
 				else if (is_in(key, "t", kill_key) and (Config::getB("show_detailed") or Config::getI("selected_pid") > 0)) {
 					atomic_wait(Runner::active);

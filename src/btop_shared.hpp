@@ -76,13 +76,11 @@ namespace Runner {
 	extern atomic<bool> stopping;
 	extern atomic<bool> redraw;
 	extern atomic<bool> coreNum_reset;
-	extern pthread_t runner_id;
 	extern bool pause_output;
 	extern string debug_bg;
 
-	void run(const string& box="", bool no_update = false, bool force_redraw = false);
+	void run(const string& box = "", bool no_update = false, bool force_redraw = false);
 	void stop();
-
 }
 
 namespace Tools {
@@ -106,9 +104,9 @@ namespace Shared {
 #endif
 }
 
+#if defined(GPU_SUPPORT)
 
 namespace Gpu {
-#ifdef GPU_SUPPORT
 	extern vector<string> box;
 	extern int width, total_height, min_width, min_height;
 	extern vector<int> x_vec, y_vec;
@@ -191,12 +189,9 @@ namespace Gpu {
 
 	//* Draw contents of gpu box using <gpus> as source
   	string draw(const gpu_info& gpu, unsigned long index, bool force_redraw, bool data_same);
-#else
-	struct gpu_info {
-		bool supported = false;
-	};
-#endif
 }
+
+#endif // GPU_SUPPORT
 
 namespace Cpu {
 	extern string box;
@@ -234,7 +229,14 @@ namespace Cpu {
 	auto collect(bool no_update = false) -> cpu_info&;
 
 	//* Draw contents of cpu box using <cpu> as source
-    string draw(const cpu_info& cpu, const vector<Gpu::gpu_info>& gpu, bool force_redraw = false, bool data_same = false);
+    string draw(
+		const cpu_info& cpu,
+#if defined(GPU_SUPPORT)
+		const vector<Gpu::gpu_info>& gpu,
+#endif
+		bool force_redraw = false,
+		bool data_same = false
+	);
 
 	//* Parse /proc/cpu info for mapping of core ids
 	auto get_core_mapping() -> std::unordered_map<int, int>;
@@ -356,6 +358,7 @@ namespace Proc {
 	extern int selected_pid, start, selected, collapse, expand, filter_found, selected_depth, toggle_children;
 	extern int scroll_pos;
 	extern string selected_name;
+	extern atomic<bool> resized;
 
 	//? Contains the valid sorting options for processes
 	const vector<string> sort_vector = {

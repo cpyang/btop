@@ -537,7 +537,14 @@ namespace Cpu {
 	vector<Draw::Graph> gpu_temp_graphs;
 	vector<Draw::Graph> gpu_mem_graphs;
 
-    string draw(const cpu_info& cpu, const vector<Gpu::gpu_info>& gpus, bool force_redraw, bool data_same) {
+    string draw(
+		const cpu_info& cpu,
+#if defined(GPU_SUPPORT)
+		const vector<Gpu::gpu_info>& gpus,
+#endif // GPU_SUPPORT
+		bool force_redraw,
+		bool data_same
+	) {
 		if (Runner::stopping) return "";
 		if (force_redraw) redraw = true;
 		bool show_temps = (Config::getB("check_temp") and got_sensors);
@@ -545,14 +552,12 @@ namespace Cpu {
 		auto single_graph = Config::getB("cpu_single_graph");
 		bool hide_cores = show_temps and (cpu_temp_only or not Config::getB("show_coretemp"));
 		const int extra_width = (hide_cores ? max(6, 6 * b_column_size) : (b_columns == 1 && !show_temps) ? 8 : 0);
-	#ifdef GPU_SUPPORT
+#if defined(GPU_SUPPORT)
 		const auto& show_gpu_info = Config::getS("show_gpu_info");
 		const bool gpu_always = show_gpu_info == "On";
 		const bool gpu_auto = show_gpu_info == "Auto";
 		const bool show_gpu = (gpus.size() > 0 and (gpu_always or (gpu_auto and Gpu::shown < Gpu::count)));
-	#else
-		(void)gpus;
-	#endif
+#endif // GPU_SUPPORT
 		auto graph_up_field = Config::getS("cpu_graph_upper");
 		if (graph_up_field == "Auto" or not v_contains(Cpu::available_fields, graph_up_field))
 			graph_up_field = "total";
@@ -594,7 +599,7 @@ namespace Cpu {
 			out += Mv::to(button_y, x + 10) + title_left + Theme::c("hi_fg") + Fx::b + 'm' + Theme::c("title") + "enu" + Fx::ub + title_right;
 			Input::mouse_mappings["m"] = {button_y, x + 11, 1, 4};
 			out += Mv::to(button_y, x + 16) + title_left + Theme::c("hi_fg") + Fx::b + 'p' + Theme::c("title") + "reset "
-				+ (Config::current_preset < 0 ? "*" : to_string(Config::current_preset)) + Fx::ub + title_right;
+				+ (!Config::current_preset.has_value() ? "*" : to_string(Config::current_preset.value())) + Fx::ub + title_right;
 			Input::mouse_mappings["p"] = {button_y, x + 17, 1, 8};
 			const string update = to_string(Config::getI("update_ms")) + "ms";
 			out += Mv::to(button_y, x + width - update.size() - 8) + title_left + Fx::b + Theme::c("hi_fg") + "- " + Theme::c("title") + update
@@ -884,12 +889,30 @@ namespace Cpu {
 			out += rjust(to_string(safeVal(cpu.core_percent, n).back()), (b_column_size < 2 ? 3 : 4)) + Theme::c(enabled ? "main_fg" : "inactive_fg") + '%';
 
 			if (show_temps and not hide_cores) {
-				const auto [temp, unit] = celsius_to(safeVal(cpu.temp, n+1).back(), temp_scale);
-				const auto temp_color = enabled ? Theme::g("temp").at(clamp(safeVal(cpu.temp, n+1).back() * 100 / cpu.temp_max, 0ll, 100ll)) : Theme::c("inactive_fg");
-				if (b_column_size > 1 and std::cmp_greater_equal(temp_graphs.size(), n))
-					out += ' ' + Theme::c("inactive_fg") + graph_bg * 5 + Mv::l(5)
-						+ temp_graphs.at(n+1)(safeVal(cpu.temp, n+1), data_same or redraw);
-				out += temp_color + rjust(to_string(temp), 4) + Theme::c(enabled ? "main_fg" : "inactive_fg") + unit;
+				const auto core_temps = safeVal(cpu.temp, n + 1);
+				if (!core_temps.empty()) {
+					// FIXME: This should be checked during collection and just not be made available with
+					// something like `std::nullopt`.
+					const auto last_temp = core_temps.back();
+					const auto [temp, unit] = celsius_to(last_temp, temp_scale);
+					const auto temp_color = enabled ? Theme::g("temp").at(clamp(last_temp * 100 / cpu.temp_max, 0ll, 100ll)) : Theme::c("inactive_fg");
+					if (b_column_size > 1 and std::cmp_greater_equal(temp_graphs.size(), n)) {
+						fmt::format_to(
+							std::back_inserter(out),
+							" {}{}{}{}", Theme::c("inactive_fg"),
+							graph_bg * 5, Mv::l(5),
+							temp_graphs.at(n + 1)(core_temps, data_same || redraw)
+						);
+					}
+					fmt::format_to(
+						std::back_inserter(out),
+						"{}{}{}{}",
+						temp_color,
+						rjust(std::to_string(temp), 4),
+						Theme::c(enabled ? "main_fg" : "inactive_fg"),
+						unit
+					);
+				}
 			}
 
 			out += Theme::c("div_line") + Symbols::v_line;
@@ -1144,10 +1167,11 @@ namespace Gpu {
 		//	+ Symbols::title_right + Symbols::h_line*(b_width/2-12) + Symbols::div_down + Symbols::h_line*(b_width/2-2) + Symbols::div_right;
 
 		//? PCIe link throughput
-		if (gpu.supported_functions.pcie_txrx and Config::getB("nvml_measure_pcie_speeds")) {
+		// Negative RX/TX means that they are manually disabled, not that they are unsupported
+		if (gpu.supported_functions.pcie_txrx and not (gpu.pcie_rx < 0 or gpu.pcie_tx < 0)) {
 			string tx_string = floating_humanizer(gpu.pcie_tx, 0, 1, 0, 1);
 			string rx_string = floating_humanizer(gpu.pcie_rx, 0, 1, 0, 1);
-			out += Mv::to(b_y + b_height_vec[index] - 1, b_x+2) + Theme::c("div_line")
+			out += Mv::to(b_y + height - 3, b_x+2) + Theme::c("div_line")
 				+ Symbols::title_left_down + Theme::c("title") + Fx::b + "TX:" + Fx::ub + Theme::c("div_line") + Symbols::title_right_down + Symbols::h_line*(b_width/2-9-tx_string.size())
 				+ Symbols::title_left_down + Theme::c("title") + Fx::b + tx_string + Fx::ub + Theme::c("div_line") + Symbols::title_right_down + (gpu.supported_functions.mem_total and gpu.supported_functions.mem_used ? Symbols::div_down : Symbols::h_line)
 				+ Symbols::title_left_down + Theme::c("title") + Fx::b + "RX:" + Fx::ub + Theme::c("div_line") + Symbols::title_right_down + Symbols::h_line*(b_width/2+b_width%2-9-rx_string.size())
@@ -1162,7 +1186,7 @@ namespace Gpu {
 #endif
 
 namespace Mem {
-	int width_p = 45, height_p = 36;
+	int width_p = 45, height_p = 40;
 	int min_width = 36, min_height = 10;
 	int x = 1, y, width = 20, height;
 	int mem_width, disks_width, divider, item_height, mem_size, mem_meter, graph_height, disk_meter;
@@ -1428,7 +1452,7 @@ namespace Mem {
 }
 
 namespace Net {
-	int width_p = 45, height_p = 32;
+	int width_p = 45, height_p = 28;
 	int min_width = 36, min_height = 6;
 	int x = 1, y, width = 20, height;
 	int b_x, b_y, b_width, b_height, d_graph_height, u_graph_height;
@@ -1561,6 +1585,8 @@ namespace Proc {
 	Draw::Graph detailed_mem_graph;
 	int user_size, thread_size, prog_size, cmd_size, tree_size;
 	int dgraph_x, dgraph_width, d_width, d_x, d_y;
+	bool previous_proc_banner_state = false;
+	atomic<bool> resized (false);
 
 	string box;
 
@@ -1568,11 +1594,19 @@ namespace Proc {
 		auto start = Config::getI("proc_start");
 		auto selected = Config::getI("proc_selected");
 		auto last_selected = Config::getI("proc_last_selected");
+		bool changed = false;
 		int select_max = (Config::getB("show_detailed") ? (Config::getB("proc_banner_shown") ? Proc::select_max - 9 : Proc::select_max - 8) :
 																(Config::getB("proc_banner_shown") ? Proc::select_max - 1 : Proc::select_max));
 
+		// Return the selection from the detailed view to the followed process before moving the selection
+		// Disengage following mode when moving the selection unless paused
 		if (Config::getB("follow_process")) {
-			if (selected == 0) selected = Config::getI("proc_followed");;
+			if (Config::getB("show_detailed") and selected == 0 and Config::getB("should_selection_return_to_followed")
+			and Config::getI("detailed_pid") == Config::getI("followed_pid")) {
+				selected = Config::getI("proc_followed");
+				Config::set("should_selection_return_to_followed", false);
+				changed = true;
+			}
 			if (not Config::getB("pause_proc_list")) {
 				Config::flip("follow_process");
 				Config::set("followed_pid", 0);
@@ -1625,7 +1659,6 @@ namespace Proc {
 			start = clamp((int)round((double)mouse_y * (numpids - select_max - 2) / (select_max - 2)), 0, max(0, numpids - select_max));
 		}
 
-		bool changed = false;
 		if (start != Config::getI("proc_start")) {
 			Config::set("proc_start", start);
 			changed = true;
@@ -1653,13 +1686,14 @@ namespace Proc {
 		auto follow_process = Config::getB("follow_process"); 
 		int followed_pid = Config::getI("followed_pid");
 		int followed = Config::getI("proc_followed");
+		bool should_selection_return_to_followed = Config::getB("should_selection_return_to_followed");
 		auto proc_banner_shown = pause_proc_list or follow_process;
 		Config::set("proc_banner_shown", proc_banner_shown);
 		start = Config::getI("proc_start");
 		selected = Config::getI("proc_selected");
 		const int y = show_detailed ? Proc::y + 8 : Proc::y;
 		const int height = show_detailed ? Proc::height - 8 : Proc::height;
-		const int select_max = show_detailed ? (proc_banner_shown ? Proc::select_max - 9 : Proc::select_max - 8) : 
+		int select_max = show_detailed ? (proc_banner_shown ? Proc::select_max - 9 : Proc::select_max - 8) : 
 												(proc_banner_shown ? Proc::select_max - 1 : Proc::select_max);
 		auto totalMem = Mem::get_totalMem();
 		int numpids = Proc::numpids;
@@ -1668,13 +1702,15 @@ namespace Proc {
 		out.reserve(width * height);
 
 		//? Move current selection/view to the selected process when a process should be followed
-		if (follow_process and (not pause_proc_list or Config::getB("update_following"))) {
+		//? Restore view and selection to the detailed view process when detailed view is closed
+		const int restore_detailed_pid = Config::getI("restore_detailed_pid");
+		if ((follow_process and (not pause_proc_list or Config::getB("update_following"))) or restore_detailed_pid > 0) {
 			Config::set("update_following", false);
 			int loc = 1;
 			bool can_follow = false;
 			for (auto& p : plist) {
 				if (p.filtered or (proc_tree and p.tree_index == plist.size())) continue;
-				if (p.pid == (size_t)followed_pid) {
+				if (p.pid == (size_t)(restore_detailed_pid > 0 ? restore_detailed_pid : followed_pid)) {
 					can_follow = true;
 					break;
 				}
@@ -1682,18 +1718,34 @@ namespace Proc {
 			}
 
 			if (can_follow) {
-				start = max(0, loc - (select_max / 2));
-				followed = loc < (select_max / 2) ? loc : start > numpids - select_max ? select_max - numpids + loc : select_max / 2;
-				Config::set("proc_followed", followed);
-				selected = followed_pid != Config::getI("detailed_pid") ? followed : 0;
+				const int list_middle = select_max % 2 == 0 ? select_max / 2 : select_max / 2 + 1;
+				start = max(0, loc - list_middle);
+				followed = loc < list_middle ? loc : start > numpids - select_max ? select_max - numpids + loc : list_middle;
+				if (restore_detailed_pid == 0) {
+					Config::set("proc_followed", followed);
+					Config::set("should_selection_return_to_followed", should_selection_return_to_followed = true);
+				}
+				selected = (followed_pid != Config::getI("detailed_pid") or restore_detailed_pid > 0) ? followed : 0;
 			}
-			else {
+			else if (restore_detailed_pid == 0) {
 				Config::set("followed_pid", followed_pid = 0);
 				Config::set("follow_process", follow_process = false);
 				Config::set("proc_banner_shown", proc_banner_shown = pause_proc_list);
 				Config::set("proc_followed", 0);
+				if (not proc_banner_shown) select_max++;
 			}
+			if (restore_detailed_pid > 0) Config::set("restore_detailed_pid", 0);
 		}
+
+		//? Handle selection edge cases when list view is showing bottom of list
+		//? for Pause and Following modes
+		const bool proc_banner_changed = proc_banner_shown != previous_proc_banner_state;
+		previous_proc_banner_state = proc_banner_shown;
+		if (proc_banner_changed and not proc_banner_shown
+		and start + select_max - 1 == numpids)
+			selected++;
+		else if (pause_proc_list and selected > select_max)
+			start++;
 
 		//? redraw if selection reaches or leaves the end of the list
 		if (selected != Config::getI("proc_last_selected")) {
@@ -1860,13 +1912,14 @@ namespace Proc {
 
 			//? select, info, signal, and follow buttons
 			const string down_button = (is_last_process_in_list ? Theme::c("inactive_fg") : Theme::c("hi_fg")) + Symbols::down;
+			const bool is_up_button_highlighted = selected != 0 or (follow_process and followed_pid == Config::getI("detailed_pid") and should_selection_return_to_followed);
+			const string up_button = (is_up_button_highlighted ? Theme::c("hi_fg") : Theme::c("inactive_fg")) + Symbols::up;
 			const string t_color = (selected == 0 ? Theme::c("inactive_fg") : Theme::c("title"));
 			const string hi_color = (selected == 0 ? Theme::c("inactive_fg") : Theme::c("hi_fg"));
 			int mouse_x = x + 14;
-			out += Mv::to(y + height - 1, x + 1) + title_left_down + Fx::b + hi_color + Symbols::up + Theme::c("title") + " select " + down_button + Fx::ub + title_right_down
-				+ title_left_down + Fx::b + t_color + "info " + hi_color + Symbols::enter + Fx::ub + title_right_down;
+			out += Mv::to(y + height - 1, x + 1) + title_left_down + Fx::b + hi_color + up_button + Theme::c("title") + " select " + down_button + Fx::ub + title_right_down
+				+ title_left_down + Fx::b + t_color + "info " + hi_color + Symbols::enter + Fx::ub + title_right_down;	
 				if (selected > 0) Input::mouse_mappings["info_enter"] = {y + height - 1, mouse_x, 1, 6};
-				else Input::mouse_mappings.erase("info_enter");
 				mouse_x += 8;
 			if (width > 60) {
 				out += title_left_down + Fx::b + hi_color + 't' + t_color + "erminate" + Fx::ub + title_right_down;
@@ -1916,15 +1969,12 @@ namespace Proc {
 			const int item_width = floor((double)(d_width - 2) / min(item_fit, 8));
 
 			//? Graph part of box
-			string cpu_str = (alive or pause_proc_list ? fmt::format("{:.2f}", detailed.entry.cpu_p) : "");
-			if (alive or pause_proc_list) {
-				cpu_str.resize(4);
-				if (cpu_str.ends_with('.')) { cpu_str.pop_back(); cpu_str.pop_back(); }
-			}
-			out += Mv::to(d_y + 1, dgraph_x + 1) + Fx::ub + detailed_cpu_graph(detailed.cpu_percent, (redraw or data_same or not alive))
-				+ Mv::to(d_y + 1, dgraph_x + 1) + Theme::c("title") + Fx::b + rjust(cpu_str, 4) + "%";
+			fmt::format_to(std::back_inserter(out), "{move}{unbold}{graph}{move}{fg_color}{bold}{cpu_str}%",
+				"move"_a = Mv::to(d_y + 1, dgraph_x + 1), "bold"_a = Fx::b, "unbold"_a = Fx::ub, "fg_color"_a = Theme::c("title"),
+				"graph"_a = detailed_cpu_graph(detailed.cpu_percent, (redraw or data_same or not alive)),
+				"cpu_str"_a = (alive or pause_proc_list) ? fmt::format("{:>4.{}f}", detailed.entry.cpu_p, detailed.entry.cpu_p < 9.995f ? 2 : detailed.entry.cpu_p < 99.95f ? 1 : 0) : "");
 			for (int i = 0; const auto& l : {'C', 'P', 'U'})
-					out += Mv::to(d_y + 3 + i++, dgraph_x + 1) + l;
+				fmt::format_to(std::back_inserter(out), "{}{}", Mv::to(d_y + 3 + i++, dgraph_x + 1), l);
 
 			//? Info part of box
 			const string stat_color = (not alive ? Theme::c("inactive_fg") : (detailed.status == "Running" ? Theme::c("proc_misc") : Theme::c("main_fg")));
@@ -2178,8 +2228,10 @@ namespace Draw {
 		Global::overlay.clear();
 		Runner::pause_output = false;
 		Runner::redraw = true;
-		Proc::p_counters.clear();
-		Proc::p_graphs.clear();
+		if (not (Proc::resized or Global::resized)) {
+			Proc::p_counters.clear();
+			Proc::p_graphs.clear();
+		}
 		if (Menu::active) Menu::redraw = true;
 
 		Input::mouse_mappings.clear();
@@ -2350,9 +2402,9 @@ namespace Draw {
 
 			width = round((double)Term::width * (Proc::shown ? width_p : 100) / 100);
 		#ifdef GPU_SUPPORT
-			height = ceil((double)Term::height * (100 - Net::height_p * Net::shown*4 / ((Gpu::shown != 0 and Cpu::shown) + 4)) / 100) - Cpu::height - Gpu::total_height;
+			height = floor(static_cast<double>(Term::height) * (100 - Net::height_p * Net::shown*4 / ((Gpu::shown != 0 and Cpu::shown) + 4)) / 100) - Cpu::height - Gpu::total_height;
 		#else
-			height = ceil((double)Term::height * (100 - Cpu::height_p * Cpu::shown - Net::height_p * Net::shown) / 100) + 1;
+			height = floor(static_cast<double>(Term::height) * (100 - Cpu::height_p * Cpu::shown - Net::height_p * Net::shown) / 100);
 		#endif
 			x = (proc_left and Proc::shown) ? Term::width - width + 1: 1;
 			if (mem_below_net and Net::shown)
