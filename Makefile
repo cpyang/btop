@@ -20,6 +20,16 @@ OLDLD := $(LDFLAGS)
 
 PREFIX ?= /usr/local
 
+#? Prefer g++-13 or g++-14 for C++23 support (<expected>, constexpr ranges)
+ifeq ($(shell command -v g++-14 >/dev/null 2>&1; echo $$?),0)
+  override CXX := g++-14
+else ifeq ($(shell command -v g++-13 >/dev/null 2>&1; echo $$?),0)
+  override CXX := g++-13
+endif
+ifeq ($(CC),)
+  override CC := $(CXX)
+endif
+
 #? Detect PLATFORM and ARCH from uname/gcc if not set
 PLATFORM ?= $(shell uname -s || echo unknown)
 ifneq ($(filter unknown Darwin, $(PLATFORM)),)
